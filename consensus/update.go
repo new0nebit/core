@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"time"
 
+	"go.sia.tech/core/internal/blake2b"
 	"go.sia.tech/core/types"
 )
 
@@ -50,15 +51,15 @@ func (w *Work) UnmarshalText(b []byte) error {
 	return nil
 }
 
+// MarshalJSON implements json.Marshaler.
+func (w Work) MarshalJSON() ([]byte, error) {
+	s, err := w.MarshalText()
+	return []byte(`"` + string(s) + `"`), err
+}
+
 // UnmarshalJSON implements json.Unmarshaler.
 func (w *Work) UnmarshalJSON(b []byte) error {
 	return w.UnmarshalText(bytes.Trim(b, `"`))
-}
-
-// MarshalJSON implements json.Marshaler.
-func (w Work) MarshalJSON() ([]byte, error) {
-	js, err := new(big.Int).SetBytes(w.n[:]).MarshalJSON()
-	return []byte(`"` + string(js) + `"`), err
 }
 
 func (w Work) add(v Work) Work {
@@ -538,7 +539,7 @@ func (ms *MidState) ApplyV2Transaction(txn types.V2Transaction) {
 			host.Value = host.Value.Sub(r.HostRollover)
 			ms.addV2FileContractElement(types.V2FileContractElement{
 				StateElement:   types.StateElement{ID: types.Hash256(types.FileContractID(fce.ID).V2RenewalID())},
-				V2FileContract: r.InitialRevision,
+				V2FileContract: r.NewContract,
 			})
 		case *types.V2StorageProof:
 			renter, host = fc.RenterOutput, fc.HostOutput
@@ -693,26 +694,24 @@ func (au ApplyUpdate) ForEachV2FileContractElement(fn func(fce types.V2FileContr
 func (au ApplyUpdate) ForEachTreeNode(fn func(row, col uint64, h types.Hash256)) {
 	seen := make(map[[2]uint64]bool)
 	au.ms.forEachElementLeaf(func(el elementLeaf) {
-		for i, h := range el.MerkleProof {
-			row, col := uint64(i), (el.LeafIndex>>i)^1
+		row, col := uint64(0), el.LeafIndex
+		h := el.hash()
+		fn(row, col, h)
+		for i, sibling := range el.MerkleProof {
+			if el.LeafIndex&(1<<i) == 0 {
+				h = blake2b.SumPair(h, sibling)
+			} else {
+				h = blake2b.SumPair(sibling, h)
+			}
+			row++
+			col >>= 1
+			fn(row, col, h)
 			if seen[[2]uint64{row, col}] {
-				break // already seen everything above this
+				return // already seen everything above this
 			}
 			seen[[2]uint64{row, col}] = true
-			fn(row, col, h)
 		}
 	})
-	for height, growth := range au.eau.treeGrowth {
-		initCol := clearBits(au.eau.oldNumLeaves, height+1)
-		for i, h := range growth {
-			row, col := uint64(height+i), (initCol>>(height+i))^1
-			if seen[[2]uint64{row, col}] {
-				break // already seen everything above this
-			}
-			seen[[2]uint64{row, col}] = true
-			fn(row, col, h)
-		}
-	}
 }
 
 // ChainIndexElement returns the chain index element for the applied block.
@@ -801,13 +800,23 @@ func (ru RevertUpdate) ForEachV2FileContractElement(fn func(fce types.V2FileCont
 func (ru RevertUpdate) ForEachTreeNode(fn func(row, col uint64, h types.Hash256)) {
 	seen := make(map[[2]uint64]bool)
 	ru.ms.forEachElementLeaf(func(el elementLeaf) {
-		for i, h := range el.MerkleProof {
-			row, col := uint64(i), (el.LeafIndex>>i)^1
+		el.Spent = false // reverting a block can never cause an element to become spent
+		row, col := uint64(0), el.LeafIndex
+		h := el.hash()
+		fn(row, col, h)
+		for i, sibling := range el.MerkleProof {
+			if el.LeafIndex&(1<<i) == 0 {
+				h = blake2b.SumPair(h, sibling)
+			} else {
+				h = blake2b.SumPair(sibling, h)
+			}
+			row++
+			col >>= 1
+			fn(row, col, h)
 			if seen[[2]uint64{row, col}] {
-				break
+				return // already seen everything above this
 			}
 			seen[[2]uint64{row, col}] = true
-			fn(row, col, h)
 		}
 	})
 }
@@ -821,13 +830,15 @@ func RevertBlock(s State, b types.Block, bs V1BlockSupplement) RevertUpdate {
 	ms.ApplyBlock(b, bs)
 
 	// compute updated elements
-	var updated []elementLeaf
+	var updated, added []elementLeaf
 	ms.forEachElementLeaf(func(el elementLeaf) {
+		el.Spent = false // reverting a block can never cause an element to become spent
 		if el.MerkleProof != nil {
-			el.Spent = false // reverting a block can never cause an element to become spent
 			updated = append(updated, el)
+		} else {
+			added = append(added, el)
 		}
 	})
-	eru := s.Elements.revertBlock(updated)
+	eru := s.Elements.revertBlock(updated, added)
 	return RevertUpdate{ms, eru}
 }

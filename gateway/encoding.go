@@ -83,61 +83,95 @@ func (h *V2BlockHeader) decodeFrom(d *types.Decoder) {
 	h.MinerAddress.DecodeFrom(d)
 }
 
-func (ot *OutlineTransaction) encodeTo(e *types.Encoder) {
-	if ot.Transaction != nil {
-		e.WriteUint8(0)
-		ot.Transaction.EncodeTo(e)
-	} else if ot.V2Transaction != nil {
-		e.WriteUint8(1)
-		ot.V2Transaction.EncodeTo(e)
-	} else {
-		e.WriteUint8(2)
-		ot.Hash.EncodeTo(e)
+func (ob *V2BlockOutline) encodeTo(e *types.Encoder) {
+	e.WriteUint64(ob.Height)
+	ob.ParentID.EncodeTo(e)
+	e.WriteUint64(ob.Nonce)
+	e.WriteTime(ob.Timestamp)
+	ob.MinerAddress.EncodeTo(e)
+
+	var txns []types.Transaction
+	var v2txns []types.V2Transaction
+	var hashes []types.Hash256
+	var kinds []uint8
+	for _, ot := range ob.Transactions {
+		switch {
+		case ot.Transaction != nil:
+			txns = append(txns, *ot.Transaction)
+			kinds = append(kinds, 0)
+		case ot.V2Transaction != nil:
+			v2txns = append(v2txns, *ot.V2Transaction)
+			kinds = append(kinds, 1)
+		default:
+			hashes = append(hashes, ot.Hash)
+			kinds = append(kinds, 2)
+		}
+	}
+	e.WritePrefix(len(txns))
+	for i := range txns {
+		txns[i].EncodeTo(e)
+	}
+	types.V2TransactionsMultiproof(v2txns).EncodeTo(e)
+	e.WritePrefix(len(hashes))
+	for i := range hashes {
+		hashes[i].EncodeTo(e)
+	}
+	for i := range kinds {
+		e.WriteUint8(kinds[i])
 	}
 }
 
-func (ot *OutlineTransaction) decodeFrom(d *types.Decoder) {
-	switch t := d.ReadUint8(); t {
-	case 0:
-		ot.Transaction = new(types.Transaction)
-		ot.Transaction.DecodeFrom(d)
-		ot.Hash = ot.Transaction.FullHash()
-	case 1:
-		ot.V2Transaction = new(types.V2Transaction)
-		ot.V2Transaction.DecodeFrom(d)
-		ot.Hash = ot.V2Transaction.FullHash()
-	case 2:
-		ot.Hash.DecodeFrom(d)
-	default:
-		d.SetErr(fmt.Errorf("invalid outline transaction type (%d)", t))
+func (ob *V2BlockOutline) decodeFrom(d *types.Decoder) {
+	ob.Height = d.ReadUint64()
+	ob.ParentID.DecodeFrom(d)
+	ob.Nonce = d.ReadUint64()
+	ob.Timestamp = d.ReadTime()
+	ob.MinerAddress.DecodeFrom(d)
+
+	txns := make([]types.Transaction, d.ReadPrefix())
+	for i := range txns {
+		txns[i].DecodeFrom(d)
+	}
+	var v2txns types.V2TransactionsMultiproof
+	v2txns.DecodeFrom(d)
+	hashes := make([]types.Hash256, d.ReadPrefix())
+	for i := range hashes {
+		hashes[i].DecodeFrom(d)
+	}
+	kinds := make([]uint8, len(txns)+len(v2txns)+len(hashes))
+	var counts [3]int
+	for i := range kinds {
+		kinds[i] = d.ReadUint8()
+		if kinds[i] > 2 {
+			d.SetErr(fmt.Errorf("invalid outline transaction type (%d)", kinds[i]))
+			return
+		}
+		counts[kinds[i]]++
+	}
+	if counts[0] != len(txns) || counts[1] != len(v2txns) || counts[2] != len(hashes) {
+		d.SetErr(fmt.Errorf("outline kinds (%v %v %v) do not match received kinds (%v %v %v)", counts[0], counts[1], counts[2], len(txns), len(v2txns), len(hashes)))
+		return
+	} else if d.Err() != nil {
+		return // FullHash chokes on invalid input
+	}
+	ob.Transactions = make([]OutlineTransaction, len(kinds))
+	for i := range ob.Transactions {
+		ot := &ob.Transactions[i]
+		switch kinds[i] {
+		case 0:
+			ot.Transaction, txns = &txns[0], txns[1:]
+			ot.Hash = ot.Transaction.FullHash()
+		case 1:
+			ot.V2Transaction, v2txns = &v2txns[0], v2txns[1:]
+			ot.Hash = ot.V2Transaction.FullHash()
+		case 2:
+			ot.Hash, hashes = hashes[0], hashes[1:]
+		}
 	}
 }
 
-func (pb *V2BlockOutline) encodeTo(e *types.Encoder) {
-	e.WriteUint64(pb.Height)
-	pb.ParentID.EncodeTo(e)
-	e.WriteUint64(pb.Nonce)
-	e.WriteTime(pb.Timestamp)
-	pb.MinerAddress.EncodeTo(e)
-	e.WritePrefix(len(pb.Transactions))
-	for i := range pb.Transactions {
-		pb.Transactions[i].encodeTo(e)
-	}
-}
-
-func (pb *V2BlockOutline) decodeFrom(d *types.Decoder) {
-	pb.Height = d.ReadUint64()
-	pb.ParentID.DecodeFrom(d)
-	pb.Nonce = d.ReadUint64()
-	pb.Timestamp = d.ReadTime()
-	pb.MinerAddress.DecodeFrom(d)
-	pb.Transactions = make([]OutlineTransaction, d.ReadPrefix())
-	for i := range pb.Transactions {
-		pb.Transactions[i].decodeFrom(d)
-	}
-}
-
-type object interface {
+// An Object can be sent or received via RPC.
+type Object interface {
 	encodeRequest(e *types.Encoder)
 	decodeRequest(d *types.Decoder)
 	maxRequestLen() int
@@ -190,10 +224,8 @@ func (r *RPCDiscoverIP) maxResponseLen() int             { return 128 }
 
 // RPCSendBlocks requests a set of blocks.
 type RPCSendBlocks struct {
-	History       [32]types.BlockID
-	Blocks        []types.Block
-	MoreAvailable bool
-	emptyResponse // SendBlocks is special
+	History [32]types.BlockID
+	Blocks  []types.Block
 }
 
 func (r *RPCSendBlocks) encodeRequest(e *types.Encoder) {
@@ -208,26 +240,33 @@ func (r *RPCSendBlocks) decodeRequest(d *types.Decoder) {
 }
 func (r *RPCSendBlocks) maxRequestLen() int { return 32 * 32 }
 
-func (r *RPCSendBlocks) encodeBlocksResponse(e *types.Encoder) {
+func (r *RPCSendBlocks) encodeResponse(e *types.Encoder) {
 	e.WritePrefix(len(r.Blocks))
 	for i := range r.Blocks {
 		types.V1Block(r.Blocks[i]).EncodeTo(e)
 	}
 }
-func (r *RPCSendBlocks) decodeBlocksResponse(d *types.Decoder) {
+func (r *RPCSendBlocks) decodeResponse(d *types.Decoder) {
 	r.Blocks = make([]types.Block, d.ReadPrefix())
 	for i := range r.Blocks {
 		(*types.V1Block)(&r.Blocks[i]).DecodeFrom(d)
 	}
 }
-func (r *RPCSendBlocks) maxBlocksResponseLen() int { return 10 * 5e6 }
-func (r *RPCSendBlocks) encodeMoreAvailableResponse(e *types.Encoder) {
+func (r *RPCSendBlocks) maxResponseLen() int { return 10 * 5e6 }
+
+// RPCSendBlocksMoreAvailable indicates whether more blocks are available.
+type RPCSendBlocksMoreAvailable struct {
+	emptyRequest
+	MoreAvailable bool
+}
+
+func (r *RPCSendBlocksMoreAvailable) encodeResponse(e *types.Encoder) {
 	e.WriteBool(r.MoreAvailable)
 }
-func (r *RPCSendBlocks) decodeMoreAvailableResponse(d *types.Decoder) {
+func (r *RPCSendBlocksMoreAvailable) decodeResponse(d *types.Decoder) {
 	r.MoreAvailable = d.ReadBool()
 }
-func (r *RPCSendBlocks) maxMoreAvailableResponseLen() int { return 1 }
+func (r *RPCSendBlocksMoreAvailable) maxResponseLen() int { return 1 }
 
 // RPCSendBlk requests a single block.
 type RPCSendBlk struct {
@@ -403,17 +442,20 @@ func (r *RPCRelayV2BlockOutline) maxRequestLen() int             { return 5e6 }
 
 // RPCRelayV2TransactionSet relays a v2 transaction set.
 type RPCRelayV2TransactionSet struct {
+	Index        types.ChainIndex
 	Transactions []types.V2Transaction
 	emptyResponse
 }
 
 func (r *RPCRelayV2TransactionSet) encodeRequest(e *types.Encoder) {
+	r.Index.EncodeTo(e)
 	e.WritePrefix(len(r.Transactions))
 	for i := range r.Transactions {
 		r.Transactions[i].EncodeTo(e)
 	}
 }
 func (r *RPCRelayV2TransactionSet) decodeRequest(d *types.Decoder) {
+	r.Index.DecodeFrom(d)
 	r.Transactions = make([]types.V2Transaction, d.ReadPrefix())
 	for i := range r.Transactions {
 		r.Transactions[i].DecodeFrom(d)
@@ -462,7 +504,7 @@ var (
 	idRelayV2TransactionSet = types.NewSpecifier("RelayV2TransactionSet")
 )
 
-func idForObject(o object) types.Specifier {
+func idForObject(o Object) types.Specifier {
 	switch o.(type) {
 	case *RPCShareNodes:
 		return idShareNodes
@@ -493,7 +535,8 @@ func idForObject(o object) types.Specifier {
 	}
 }
 
-func objectForID(id types.Specifier) object {
+// ObjectForID returns the object type corresponding to the given RPC ID.
+func ObjectForID(id types.Specifier) Object {
 	switch id {
 	case idShareNodes:
 		return new(RPCShareNodes)

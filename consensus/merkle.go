@@ -81,13 +81,13 @@ func chainIndexLeaf(e *types.ChainIndexElement) elementLeaf {
 
 // siacoinLeaf returns the elementLeaf for a SiacoinElement.
 func siacoinLeaf(e *types.SiacoinElement, spent bool) elementLeaf {
-	elemHash := hashAll("leaf/siacoin", e.ID, e.SiacoinOutput, e.MaturityHeight)
+	elemHash := hashAll("leaf/siacoin", e.ID, types.V2SiacoinOutput(e.SiacoinOutput), e.MaturityHeight)
 	return elementLeaf{&e.StateElement, elemHash, spent}
 }
 
 // siafundLeaf returns the elementLeaf for a SiafundElement.
 func siafundLeaf(e *types.SiafundElement, spent bool) elementLeaf {
-	elemHash := hashAll("leaf/siafund", e.ID, e.SiafundOutput, e.ClaimStart)
+	elemHash := hashAll("leaf/siafund", e.ID, types.V2SiafundOutput(e.SiafundOutput), types.V2Currency(e.ClaimStart))
 	return elementLeaf{&e.StateElement, elemHash, spent}
 }
 
@@ -358,9 +358,12 @@ func (acc *ElementAccumulator) applyBlock(updated, added []elementLeaf) (eau ele
 // under acc, which must be the accumulator prior to the application of those
 // elements. All of the elements will be marked unspent. The accumulator itself
 // is not modified.
-func (acc *ElementAccumulator) revertBlock(updated []elementLeaf) (eru elementRevertUpdate) {
+func (acc *ElementAccumulator) revertBlock(updated, added []elementLeaf) (eru elementRevertUpdate) {
 	eru.updated = updateLeaves(updated)
 	eru.numLeaves = acc.NumLeaves
+	for i := range added {
+		added[i].LeafIndex = acc.NumLeaves + uint64(i)
+	}
 	return
 }
 

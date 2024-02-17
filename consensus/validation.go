@@ -95,8 +95,6 @@ func ValidateOrphan(s State, b types.Block) error {
 	if b.V2 != nil {
 		if b.V2.Height != s.Index.Height+1 {
 			return errors.New("block height does not increment parent height")
-		} else if b.V2.Commitment != s.Commitment(s.TransactionsCommitment(b.Transactions, b.V2Transactions()), b.MinerPayouts[0].Address) {
-			return errors.New("commitment hash mismatch")
 		}
 	}
 	return nil
@@ -245,8 +243,6 @@ func validateFileContracts(ms *MidState, txn types.Transaction, ts V1Transaction
 			return fmt.Errorf("file contract %v has window that starts in the past", i)
 		} else if fc.WindowEnd <= fc.WindowStart {
 			return fmt.Errorf("file contract %v has window that ends before it begins", i)
-		} else if fc.WindowStart >= ms.base.Network.HardforkV2.RequireHeight {
-			return fmt.Errorf("file contract %v ends after v2 hardfork", i)
 		}
 		var validSum, missedSum types.Currency
 		for _, output := range fc.ValidProofOutputs {
@@ -269,8 +265,6 @@ func validateFileContracts(ms *MidState, txn types.Transaction, ts V1Transaction
 			return fmt.Errorf("file contract revision %v has window that starts in the past", i)
 		} else if fcr.FileContract.WindowEnd <= fcr.FileContract.WindowStart {
 			return fmt.Errorf("file contract revision %v has window that ends before it begins", i)
-		} else if fcr.WindowStart >= ms.base.Network.HardforkV2.RequireHeight {
-			return fmt.Errorf("file contract revision %v ends after v2 hardfork", i)
 		} else if txid, ok := ms.spent(types.Hash256(fcr.ParentID)); ok {
 			return fmt.Errorf("file contract revision %v conflicts with previous proof or revision (in %v)", i, txid)
 		}
@@ -559,10 +553,10 @@ func validateV2CurrencyValues(ms *MidState, txn types.V2Transaction) error {
 	for i, fcr := range txn.FileContractResolutions {
 		switch r := fcr.Resolution.(type) {
 		case *types.V2FileContractRenewal:
-			if r.InitialRevision.RenterOutput.Value.IsZero() && r.InitialRevision.HostOutput.Value.IsZero() {
+			if r.NewContract.RenterOutput.Value.IsZero() && r.NewContract.HostOutput.Value.IsZero() {
 				return fmt.Errorf("file contract renewal %v creates contract with zero value", i)
 			}
-			addContract(r.InitialRevision)
+			addContract(r.NewContract)
 			add(r.RenterRollover)
 			add(r.HostRollover)
 		case *types.V2FileContractFinalization:
@@ -625,7 +619,7 @@ func validateV2Siacoins(ms *MidState, txn types.V2Transaction) error {
 			inputSum = inputSum.Add(r.RenterRollover)
 			inputSum = inputSum.Add(r.HostRollover)
 
-			rev := r.InitialRevision
+			rev := r.NewContract
 			outputSum = outputSum.Add(rev.RenterOutput.Value).Add(rev.HostOutput.Value).Add(ms.base.V2FileContractTax(rev))
 		}
 	}
@@ -721,16 +715,16 @@ func validateV2FileContracts(ms *MidState, txn types.V2Transaction) error {
 			// finalization of the old contract, allowing them to successfully
 			// resolve the contract without a storage proof.
 			if fc.RenterSignature != (types.Signature{}) {
-				return fmt.Errorf("has non-empty renter signature")
+				return errors.New("has non-empty renter signature")
 			} else if fc.HostSignature != (types.Signature{}) {
-				return fmt.Errorf("has non-empty host signature")
+				return errors.New("has non-empty host signature")
 			}
 		} else {
 			contractHash := ms.base.ContractSigHash(fc)
 			if !renter.VerifyHash(contractHash, fc.RenterSignature) {
-				return fmt.Errorf("has invalid renter signature")
+				return errors.New("has invalid renter signature")
 			} else if !host.VerifyHash(contractHash, fc.HostSignature) {
-				return fmt.Errorf("has invalid host signature")
+				return errors.New("has invalid host signature")
 			}
 		}
 		return nil
@@ -759,7 +753,7 @@ func validateV2FileContracts(ms *MidState, txn types.V2Transaction) error {
 		case !revOutputSum.Equals(curOutputSum):
 			return fmt.Errorf("modifies output sum (%d H -> %d H)", curOutputSum, revOutputSum)
 		case rev.TotalCollateral != cur.TotalCollateral:
-			return fmt.Errorf("modifies total collateral")
+			return errors.New("modifies total collateral")
 		case rev.ProofHeight < ms.base.childHeight():
 			return fmt.Errorf("has proof height (%v) that has already passed", rev.ProofHeight)
 		case rev.ExpirationHeight <= rev.ProofHeight:
@@ -799,7 +793,7 @@ func validateV2FileContracts(ms *MidState, txn types.V2Transaction) error {
 		switch r := fcr.Resolution.(type) {
 		case *types.V2FileContractRenewal:
 			renewal := *r
-			old, renewed := renewal.FinalRevision, renewal.InitialRevision
+			old, renewed := renewal.FinalRevision, renewal.NewContract
 			if old.RevisionNumber != types.MaxRevisionNumber {
 				return fmt.Errorf("file contract renewal %v does not finalize old contract", i)
 			} else if err := validateRevision(fc, old, true); err != nil {
@@ -908,6 +902,11 @@ func ValidateV2Transaction(ms *MidState, txn types.V2Transaction) error {
 func ValidateBlock(s State, b types.Block, bs V1BlockSupplement) error {
 	if err := ValidateOrphan(s, b); err != nil {
 		return err
+	}
+	if b.V2 != nil {
+		if b.V2.Commitment != s.Commitment(s.TransactionsCommitment(b.Transactions, b.V2Transactions()), b.MinerPayouts[0].Address) {
+			return errors.New("commitment hash mismatch")
+		}
 	}
 	ms := NewMidState(s)
 	for i, txn := range b.Transactions {
