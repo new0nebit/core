@@ -2,9 +2,11 @@ package types
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -337,6 +339,12 @@ func TestPolicyMarshaling(t *testing.T) {
 	publicKey := privateKey.PublicKey()
 	publicKeyHex := hex.EncodeToString(publicKey[:])
 
+	// Generating a unique SHA256 hash from the current Unix time in nanoseconds for PolicyTypeHash tests and converting it to a hexadecimal string
+	currentTime := time.Now().UnixNano()
+	currentTimeBytes := []byte(strconv.FormatInt(currentTime, 10))
+	hash := sha256.Sum256(currentTimeBytes)
+	hashHex := hex.EncodeToString(hash[:])
+
 	tests := []struct {
 		name        string
 		input       interface{}
@@ -367,13 +375,21 @@ func TestPolicyMarshaling(t *testing.T) {
 				return v.(SpendPolicy).MarshalText()
 			},
 		},
-
+		{
+			name:   "MarshalText with PolicyTypeHash",
+			input:  SpendPolicy{Type: PolicyTypeHash(hash)},
+			output: "h(0x" + hashHex + ")",
+			marshalFunc: func(v interface{}) ([]byte, error) {
+				return v.(SpendPolicy).MarshalText()
+			},
+		},
 		{
 			name: "MarshalJSON",
 			input: SatisfiedPolicy{
 				Preimages: [][]byte{{0xde, 0xad, 0xbe, 0xef}, {0xba, 0xad, 0xf0, 0x0d}},
 			},
 			output: "preimages",
+			//nolint:unlambda
 			marshalFunc: func(v interface{}) ([]byte, error) {
 				return json.Marshal(v)
 			},
