@@ -2,7 +2,11 @@ package types
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -327,5 +331,130 @@ func TestPolicyRoundtrip(t *testing.T) {
 	roundtrip(sp, &sp2)
 	if fmt.Sprint(sp) != fmt.Sprint(sp2) {
 		t.Fatal("satisfied policy did not survive roundtrip:", sp, sp2)
+	}
+}
+
+func TestPolicyMarshaling(t *testing.T) {
+	privateKey := GeneratePrivateKey()
+	publicKey := privateKey.PublicKey()
+	publicKeyHex := hex.EncodeToString(publicKey[:])
+
+	// Generating a unique SHA256 hash from the current Unix time in nanoseconds for PolicyTypeHash tests and converting it to a hexadecimal string
+	currentTime := time.Now().UnixNano()
+	currentTimeBytes := []byte(strconv.FormatInt(currentTime, 10))
+	hash := sha256.Sum256(currentTimeBytes)
+	hashHex := hex.EncodeToString(hash[:])
+
+	tests := []struct {
+		name        string
+		input       interface{}
+		output      string
+		marshalFunc func(interface{}) ([]byte, error)
+	}{
+		{
+			name:   "MarshalText",
+			input:  SpendPolicy{Type: PolicyTypeAbove(100)},
+			output: "above(100)",
+			marshalFunc: func(v interface{}) ([]byte, error) {
+				return v.(SpendPolicy).MarshalText()
+			},
+		},
+		{
+			name:   "MarshalText with PolicyTypeAfter",
+			input:  SpendPolicy{Type: PolicyTypeAfter(time.Unix(1234567890, 0))},
+			output: "after(1234567890)",
+			marshalFunc: func(v interface{}) ([]byte, error) {
+				return v.(SpendPolicy).MarshalText()
+			},
+		},
+		{
+			name:   "MarshalText with PolicyTypePublicKey",
+			input:  SpendPolicy{Type: PolicyTypePublicKey(publicKey)},
+			output: "pk(0x" + publicKeyHex + ")",
+			marshalFunc: func(v interface{}) ([]byte, error) {
+				return v.(SpendPolicy).MarshalText()
+			},
+		},
+		{
+			name:   "MarshalText with PolicyTypeHash",
+			input:  SpendPolicy{Type: PolicyTypeHash(hash)},
+			output: "h(0x" + hashHex + ")",
+			marshalFunc: func(v interface{}) ([]byte, error) {
+				return v.(SpendPolicy).MarshalText()
+			},
+		},
+		{
+			name: "MarshalJSON",
+			input: SatisfiedPolicy{
+				Preimages: [][]byte{{0xde, 0xad, 0xbe, 0xef}, {0xba, 0xad, 0xf0, 0x0d}},
+			},
+			output:      "preimages",
+			marshalFunc: json.Marshal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.marshalFunc(tt.input)
+			if err != nil {
+				t.Fatalf("Expected no error, but got %v", err)
+			}
+
+			if !bytes.Contains(data, []byte(tt.output)) {
+				t.Fatalf("Expected %v in the output, but it was not found. Got: %s", tt.output, string(data))
+			}
+		})
+	}
+}
+
+func TestPolicyUnmarshaling(t *testing.T) {
+	tests := []struct {
+		name          string
+		jsonData      string
+		expectErr     bool
+		preimage      string
+		checkPreimage bool
+	}{
+		{
+			name:      "InvalidHex",
+			jsonData:  `{"Policy": null, "Signatures": null, "Preimages": ["InvalidHex"]}`,
+			expectErr: true,
+		},
+		{
+			name:      "InvalidStruct",
+			jsonData:  `{"Policy": "ShouldBeAnObjectNotAString", "Signatures": null, "Preimages": []}`,
+			expectErr: true,
+		},
+		{
+			name:      "InvalidPolicyType",
+			jsonData:  `{"Policy": "ShouldBeAnObjectNotAString", "Signatures": null, "Preimages": []}`,
+			expectErr: true,
+		},
+		{
+			name:          "ValidPreimage",
+			jsonData:      `{"Policy": null, "Signatures": null, "Preimages": ["68656c6c6f776f726c64"]}`,
+			expectErr:     false,
+			preimage:      "helloworld",
+			checkPreimage: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sp SatisfiedPolicy
+			err := sp.UnmarshalJSON([]byte(tt.jsonData))
+			if tt.expectErr && err == nil {
+				t.Fatal("Expected an error, but got none")
+			} else if !tt.expectErr && err != nil {
+				t.Fatalf("Did not expect an error, but got: %v", err)
+			}
+
+			if tt.checkPreimage {
+				expectedPreimage, _ := hex.DecodeString("68656c6c6f776f726c64")
+				if string(sp.Preimages[0]) != string(expectedPreimage) {
+					t.Fatalf("Expected preimage %s, got %s", expectedPreimage, sp.Preimages[0])
+				}
+			}
+		})
 	}
 }
